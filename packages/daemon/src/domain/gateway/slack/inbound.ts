@@ -118,7 +118,12 @@ export interface InboundDeps {
   /** S10 thread routing (deterministic, zero inference): resolve the destination + tags for an
    *  admitted event. Absent → every event lands on the static `destination` (the pre-routing
    *  shape, and the fallback the tests pin). */
-  resolveRoute?: (ev: SlackEvent) => { destination: string; tags?: string[]; correlationQitemId?: string };
+  resolveRoute?: (ev: SlackEvent) => { destination: string; tags?: string[]; correlationQitemId?: string; routeClass?: string };
+  /** A top-level message a human started has landed as a qitem. The subsystem records that
+   *  message as the root of its own conversation, so the seat's `--reply-to` update posts under
+   *  it and a later reply there reaches the same seat. Best-effort: a failure here never costs
+   *  the row that already landed. */
+  onHumanInitiatedRoot?: (root: { threadTs: string; channel?: string; human: string; seat: string; qitemId: string }) => void;
   /** Continue an exact human gate through the existing Mission Control resolve primitive. */
   resolveHumanReply?: (input: { qitemId: string; actorSession: string; decision: string }) => Promise<"resolved" | "already-resolved" | "not-applicable">;
   /** #193 — record a clicked answer on the decision the clicked message belongs to. */
@@ -272,6 +277,13 @@ export class InboundRouter {
       }
       this.deps.seen.mark(eventId, "landed"); // durable qitem exists → safe to mark
       this.deps.log?.(`qitem ${qitemId} -> ${route.destination} (ts=${ts})`);
+      if (route.routeClass === "human-initiated" && this.deps.onHumanInitiatedRoot) {
+        try {
+          this.deps.onHumanInitiatedRoot({ threadTs: ts, channel: ev.channel, human: who.source, seat: route.destination, qitemId });
+        } catch (e) {
+          this.deps.log?.(`human-initiated root not mapped qitem=${qitemId} ts=${ts}: ${(e as Error).message}`);
+        }
+      }
       return { landed: true, qitemId, correlationQitemId: route.correlationQitemId, replyResolution };
     } finally {
       this.inflight.delete(eventId);

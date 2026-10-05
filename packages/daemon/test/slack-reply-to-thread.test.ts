@@ -170,7 +170,7 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
     });
 
     // Rebuild the wire with inbound Socket Mode on a fake socket; returns a human-reply sender.
-    async function connectInbound(): Promise<(threadTs: string, ts: string) => Promise<void>> {
+    async function connectInbound(): Promise<(threadTs: string | undefined, ts: string) => Promise<void>> {
       const secrets = join(home, "fake.env");
       writeFileSync(secrets, "SLACK_BOT_TOKEN=xoxb-EXAMPLE-fake\nSLACK_APP_TOKEN=xapp-EXAMPLE-fake\n");
       const sockets: WsLike[] = [];
@@ -189,7 +189,8 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       stops.push(() => wire.stop()); wire.startServices?.();
       await vi.waitFor(() => expect(sockets).toHaveLength(1));
       sockets[0]!.onopen?.();
-      const humanReply = async (threadTs: string, ts: string) => {
+      // threadTs undefined = a top-level message (JSON drops the field).
+      const humanReply = async (threadTs: string | undefined, ts: string) => {
         sockets[0]!.onmessage?.({ data: JSON.stringify({ envelope_id: `e-${ts}`, type: "events_api", payload: { event: { type: "message", user: "UFOUNDER", text: "thanks", ts, thread_ts: threadTs, channel: "C-TEST" } } }) });
         await new Promise((r) => setTimeout(r, 50));
       };
@@ -277,6 +278,52 @@ describe("update --reply-to an earlier item's thread (#96)", () => {
       await deliver(update.qitemId);
       expect(posts[0]?.thread_ts).toBeUndefined();
       expect(repo.getById(update.qitemId)?.replyToFallback).toMatch(/root-missing/);
+    });
+
+    // A message the human starts top-level lands on the inbound destination; that seat answers it.
+    const operator = "operator-agent@kernel";
+    const inboundRows = () => db.prepare("SELECT qitem_id AS qitemId, tags FROM queue_items WHERE source_session = ? ORDER BY rowid").all(human) as Array<{ qitemId: string; tags: string }>;
+
+    it("an update --reply-to a message the human started top-level posts under that message", async () => {
+      const humanSays = await connectInbound();
+      await humanSays(undefined, "500.1");
+      await vi.waitFor(() => expect(inboundRows()).toHaveLength(1));
+      const asked = inboundRows()[0]!.qitemId;
+      expect(new ThreadSeatMap(db).resolveByConversation(asked)).toMatchObject({ threadTs: "500.1", channel: "C-TEST", human, seat: operator, state: "open" });
+
+      const answer = await repo.create({ sourceSession: operator, destinationSession: human, humanIntent: "update", summary: "On it.", body: "Started.", replyTo: asked, nudge: false });
+      await deliver(answer.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBe("500.1");
+      expect(repo.getById(answer.qitemId)?.replyToFallback).toBeNull();
+    });
+
+    it("a later reply under the human's own top-level message reaches the same seat and resolves nothing", async () => {
+      const humanSays = await connectInbound();
+      await humanSays(undefined, "500.1");
+      await vi.waitFor(() => expect(inboundRows()).toHaveLength(1));
+      const asked = inboundRows()[0]!.qitemId;
+      const before = repo.getById(asked);
+
+      await humanSays("500.1", "500.2");
+      await vi.waitFor(() => expect(inboundRows()).toHaveLength(2));
+      const followUp = repo.getById(inboundRows()[1]!.qitemId);
+      expect(followUp?.destinationSession).toBe(operator);
+      expect(followUp?.tags).toEqual(expect.arrayContaining(["thread", `reply-to:${asked}`]));
+      expect(repo.getById(asked)?.state).toBe(before?.state); // the first message is not a human gate
+      expect(new ThreadSeatMap(db).resolveByThread("500.2")).toBeNull(); // a reply is never a root
+    });
+
+    it("a human reply in a thread nothing mapped opens no root: an update --reply-to it still falls back", async () => {
+      const humanSays = await connectInbound();
+      await humanSays("777.1", "777.2");
+      await vi.waitFor(() => expect(inboundRows()).toHaveLength(1));
+      const stray = inboundRows()[0]!.qitemId;
+      expect(new ThreadSeatMap(db).resolveByConversation(stray)).toBeNull();
+
+      const answer = await repo.create({ sourceSession: operator, destinationSession: human, humanIntent: "update", summary: "Seen.", body: "Seen.", replyTo: stray, nudge: false });
+      await deliver(answer.qitemId);
+      expect(posts.at(-1)?.thread_ts).toBeUndefined();
+      expect(repo.getById(answer.qitemId)?.replyToFallback).toMatch(/root-missing/);
     });
 
     it("falls back when the referenced root is closed", async () => {

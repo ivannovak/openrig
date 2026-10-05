@@ -1,7 +1,8 @@
 // S10 — deterministic thread ROUTING over the thread↔seat map. The four enumerated classes
 // (proof contract), each a pure lookup — zero inference:
 //   1. NEW conversation      — outbound-only: a fresh root posts un-threaded, then the map
-//                              opens (thread_ts = the posted root's ts). Inbound never mints.
+//                              opens (thread_ts = the posted root's ts). Inbound routing never
+//                              mints; the one inbound root is class 4's top-level message (below).
 //   2. EXISTING thread       — reply carries thread_ts, map hit (open) → EXACTLY the mapped seat.
 //   3. CLOSED thread         — map hit (closed) → STILL exactly the mapped seat (closure is
 //                              conversation state, never a routing black hole).
@@ -9,6 +10,10 @@
 //                              (no thread_ts): the ORCHESTRATOR's unrouted-signal row — the
 //                              configured inbound destination with the unrouted-signal tag.
 //                              Never dropped, never guessed at a seat.
+//                              A top-level message is then mapped as the root of its own
+//                              conversation (seat = the destination it landed on), so the seat can
+//                              answer in that thread and a later reply there is class 2. A reply in
+//                              an unmapped thread opens nothing.
 
 import type { SlackEvent } from "./inbound.js";
 import type { ThreadSeatMap } from "./thread-seat-map.js";

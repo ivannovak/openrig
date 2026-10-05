@@ -576,6 +576,23 @@ export function buildSlackGatewayWire(opts: SlackWireOpts): GatewayWire {
       // or human-initiated → the configured orchestrator slot as an unrouted-signal row.
       resolveRoute: makeThreadRouteResolver({ map: threadMap, unroutedDestination: cfg.inboundDestination, log }),
       resolveHumanReply: opts.resolveHumanReply,
+      // A message a human starts top-level is the root of its own conversation. Mapping it lets
+      // the seat that received it answer in that thread (`--reply-to` the inbound row) instead of
+      // falling back to a new top-level post (root-missing), and routes a later reply there to
+      // the same seat. The stamp keeps the map rebuildable, as for a root the daemon posted.
+      onHumanInitiatedRoot: ({ threadTs, channel, human, seat, qitemId }) => {
+        const rootChannel = channel ?? cfg.channel!;
+        threadMap.open({ threadTs, channel: rootChannel, human, seat, conversationId: qitemId });
+        try {
+          opts.queueRepo.update({
+            qitemId,
+            actorSession: "daemon@kernel",
+            transitionNote: formatPostedStamp({ threadTs, messageTs: threadTs, channel: rootChannel, human, seat, conversationId: qitemId }),
+          });
+        } catch (e) {
+          log(`thread stamp failed for ${qitemId}: ${(e as Error).message}`);
+        }
+      },
       // #193 — a button click records its answer on the decision the clicked root belongs to;
       // a failed hand-back is retried with the event dead-letters, and each click is confirmed
       // in the decision's thread (a bot post, so inbound never ingests it).
